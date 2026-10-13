@@ -1,0 +1,80 @@
+# Keeps every comic on the site at 500px on its longest side, so nothing
+# online is print quality. When a comic is uploaded at full size, this
+# shrinks it and commits the smaller copy back. The full-size upload stays in
+# git history, which is where the FAEVAD bot copies it from into the
+# artist's local originals folder (~/Pictures/GoblinTales).
+
+name: Shrink comics to 500px
+
+on:
+  push:
+    branches: [main]
+    paths: ["images/artwork/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: shrink-comics
+  cancel-in-progress: false
+
+jobs:
+  shrink:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install Pillow==11.3.0
+
+      - name: Shrink anything over 500px
+        run: |
+          python - <<'EOF'
+          from pathlib import Path
+          from PIL import Image, ImageOps
+
+          LONGEST_SIDE = 500
+          for path in sorted(Path("images/artwork").iterdir()):
+              if path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                  continue
+              with Image.open(path) as im:
+                  if max(im.size) <= LONGEST_SIDE:
+                      continue
+                  before = im.size
+                  # Turn the image upright before the EXIF data is dropped.
+                  im = ImageOps.exif_transpose(im)
+                  im.thumbnail((LONGEST_SIDE, LONGEST_SIDE), Image.LANCZOS)
+                  if path.suffix.lower() == ".png":
+                      im.save(path, "PNG", optimize=True)
+                  else:
+                      im.convert("RGB").save(path, "JPEG", quality=85)
+              print(f"{path}: {before} -> {im.size}")
+          EOF
+
+      - name: Commit the smaller copies
+        id: commit
+        run: |
+          if git diff --quiet; then
+            echo "Nothing to shrink."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Shrink new comics to 500px"
+          # Sam may have pushed again (e.g. data.json) while this ran.
+          git pull --rebase origin main
+          git push origin HEAD:main
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      # Pushes made by this workflow don't always start a Pages build on
+      # their own, so ask for one.
+      - name: Rebuild the site
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds"
